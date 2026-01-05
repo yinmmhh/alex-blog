@@ -13,228 +13,91 @@ else
     HTTP_PORT=8080
 fi
 
-echo "[启动] 端口: $HTTP_PORT"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+echo "[启动] 端口: $HTTP_PORT, 目录: $SCRIPT_DIR"
 
-# ===== 立即启动 HTTP 服务器（满足健康检查） =====
-PUBLIC_DIR="${PWD}/public"
+# ===== 立即启动 HTTP 服务器 =====
 cat > "${FILE_PATH}/server.js" <<'JSEOF'
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
 const port = process.argv[2] || 8080;
-const bind = process.argv[3] || '0.0.0.0';
-const publicDir = process.argv[4] || './public';
-const filePathDir = process.argv[5] || '/tmp/.npm';
+const publicDir = process.argv[3] || './public';
+const filePathDir = process.argv[4] || '/tmp/.npm';
 
-const mimeTypes = {
-    '.html': 'text/html',
-    '.css': 'text/css',
-    '.js': 'application/javascript',
-    '.png': 'image/png',
-    '.jpg': 'image/jpeg',
-    '.svg': 'image/svg+xml',
-    '.ico': 'image/x-icon'
-};
+const mimeTypes = {'.html':'text/html','.css':'text/css','.js':'application/javascript','.png':'image/png','.jpg':'image/jpeg','.svg':'image/svg+xml','.ico':'image/x-icon'};
 
 http.createServer((req, res) => {
     const url = req.url.split('?')[0];
-    
-    // 健康检查
-    if (url.includes('health') || url.includes('check')) {
-        res.writeHead(200, {'Content-Type': 'text/plain'});
-        res.end('OK');
-        return;
-    }
-    
+    if (url.includes('health') || url.includes('check')) { res.writeHead(200); res.end('OK'); return; }
     if (url.includes('/sub')) {
-        res.writeHead(200, {
-            'Content-Type': 'text/plain; charset=utf-8',
-            'Cache-Control': 'no-cache'
-        });
-        try { 
-            res.end(fs.readFileSync(path.join(filePathDir, 'sub.txt'), 'utf8')); 
-        } catch(e) { 
-            res.end('Subscription not ready, please wait...'); 
-        }
+        res.writeHead(200, {'Content-Type': 'text/plain; charset=utf-8'});
+        try { res.end(fs.readFileSync(path.join(filePathDir, 'sub.txt'), 'utf8')); } 
+        catch(e) { res.end('Loading...'); }
         return;
     }
-    
     let filePath = url === '/' ? path.join(publicDir, 'index.html') : path.join(publicDir, url);
-    const ext = path.extname(filePath).toLowerCase();
-    const contentType = mimeTypes[ext] || 'text/plain';
-    
     fs.readFile(filePath, (err, content) => {
-        if (err) {
-            fs.readFile(path.join(publicDir, 'index.html'), (e, html) => {
-                res.writeHead(e ? 404 : 200, {'Content-Type': 'text/html'});
-                res.end(e ? '404 Not Found' : html);
-            });
-        } else {
-            res.writeHead(200, {'Content-Type': contentType});
-            res.end(content);
-        }
+        if (err) { res.writeHead(404); res.end('404'); } 
+        else { res.writeHead(200, {'Content-Type': mimeTypes[path.extname(filePath)] || 'text/plain'}); res.end(content); }
     });
-}).listen(port, bind, () => console.log('[HTTP] Started on ' + bind + ':' + port));
+}).listen(port, '0.0.0.0', () => console.log('[HTTP] :' + port));
 JSEOF
 
-echo "[HTTP] 启动服务器..."
-node "${FILE_PATH}/server.js" $HTTP_PORT 0.0.0.0 "$PUBLIC_DIR" "$FILE_PATH" &
+node "${FILE_PATH}/server.js" $HTTP_PORT "${SCRIPT_DIR}/public" "$FILE_PATH" &
 HTTP_PID=$!
-sleep 1
+echo "[HTTP] PID: $HTTP_PID"
 
-# 验证 HTTP 服务器已启动
-if ! kill -0 $HTTP_PID 2>/dev/null; then
-    echo "[错误] HTTP 服务器启动失败"
-    exit 1
-fi
-echo "[HTTP] PID: $HTTP_PID - 服务器已就绪"
+# ===== 直接使用仓库中的二进制文件（不复制！） =====
+SB_FILE="${SCRIPT_DIR}/bin/sb"
+ARGO_FILE="${SCRIPT_DIR}/bin/cloudflared"
 
-# ===== 后台初始化其他服务 =====
-(
-    sleep 2
-    
-    echo "[初始化] 开始后台设置..."
-    
-    # UUID
-    UUID_FILE="${FILE_PATH}/uuid.txt"
-    if [ -f "$UUID_FILE" ]; then
-        UUID=$(cat "$UUID_FILE")
-    else
-        UUID=$(cat /proc/sys/kernel/random/uuid)
-        echo "$UUID" > "$UUID_FILE"
-    fi
-    echo "[UUID] $UUID"
-    
-    # 二进制文件
-    SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-    SB_FILE="${FILE_PATH}/sb"
-    ARGO_FILE="${FILE_PATH}/cloudflared"
-    
-    if [ -f "${SCRIPT_DIR}/bin/sb" ]; then
-        cp "${SCRIPT_DIR}/bin/sb" "$SB_FILE" && chmod +x "$SB_FILE"
-        echo "[二进制] sb 已就绪"
-    fi
-    
-    if [ -f "${SCRIPT_DIR}/bin/cloudflared" ]; then
-        cp "${SCRIPT_DIR}/bin/cloudflared" "$ARGO_FILE" && chmod +x "$ARGO_FILE"
-        echo "[二进制] cloudflared 已就绪"
-    fi
-    
-    # 证书
-    if [ ! -f "${FILE_PATH}/cert.pem" ]; then
-        if command -v openssl >/dev/null 2>&1; then
-            openssl req -x509 -newkey rsa:2048 -nodes -sha256 \
-                -keyout "${FILE_PATH}/private.key" \
-                -out "${FILE_PATH}/cert.pem" \
-                -days 3650 -subj "/CN=www.bing.com" >/dev/null 2>&1
-        fi
-        echo "[证书] 已生成"
-    fi
-    
-    # CF 优选
-    CF_DOMAINS=("cf.090227.xyz" "cf.877774.xyz" "cf.130519.xyz")
-    BEST_CF_DOMAIN="${CF_DOMAINS[0]}"
-    
-    # ISP
-    ISP="Node"
-    
-    # Sing-box 配置
-    INTERNAL_VL_PORT=8081
-    INTERNAL_VM_PORT=8082
-    INTERNAL_TJ_PORT=8083
-    
-    cat > "${FILE_PATH}/config.json" <<CFGEOF
-{
-    "log": {"level": "warn"},
-    "inbounds": [
-        {
-            "type": "vless",
-            "tag": "vl-in",
-            "listen": "127.0.0.1",
-            "listen_port": ${INTERNAL_VL_PORT},
-            "users": [{"uuid": "${UUID}"}],
-            "transport": {"type": "ws", "path": "/${UUID}-vl"}
-        },
-        {
-            "type": "vmess",
-            "tag": "vm-in",
-            "listen": "127.0.0.1",
-            "listen_port": ${INTERNAL_VM_PORT},
-            "users": [{"uuid": "${UUID}", "alterId": 0}],
-            "transport": {"type": "ws", "path": "/${UUID}-vm"}
-        },
-        {
-            "type": "trojan",
-            "tag": "tj-in",
-            "listen": "127.0.0.1",
-            "listen_port": ${INTERNAL_TJ_PORT},
-            "users": [{"password": "${UUID}"}],
-            "transport": {"type": "ws", "path": "/${UUID}-tj"}
-        }
-    ],
-    "outbounds": [{"type": "direct", "tag": "direct"}]
-}
+chmod +x "$SB_FILE" "$ARGO_FILE" 2>/dev/null
+
+# UUID
+UUID_FILE="${FILE_PATH}/uuid.txt"
+[ -f "$UUID_FILE" ] && UUID=$(cat "$UUID_FILE") || { UUID=$(cat /proc/sys/kernel/random/uuid); echo "$UUID" > "$UUID_FILE"; }
+echo "[UUID] $UUID"
+
+# CF 优选
+BEST_CF_DOMAIN="cf.090227.xyz"
+ISP="Node"
+
+# Sing-box 配置
+cat > "${FILE_PATH}/config.json" <<CFGEOF
+{"log":{"level":"warn"},"inbounds":[{"type":"vless","listen":"127.0.0.1","listen_port":8081,"users":[{"uuid":"${UUID}"}],"transport":{"type":"ws","path":"/${UUID}-vl"}},{"type":"vmess","listen":"127.0.0.1","listen_port":8082,"users":[{"uuid":"${UUID}","alterId":0}],"transport":{"type":"ws","path":"/${UUID}-vm"}},{"type":"trojan","listen":"127.0.0.1","listen_port":8083,"users":[{"password":"${UUID}"}],"transport":{"type":"ws","path":"/${UUID}-tj"}}],"outbounds":[{"type":"direct"}]}
 CFGEOF
-    
-    # 启动 Sing-box
-    if [ -x "$SB_FILE" ]; then
-        "$SB_FILE" run -c "${FILE_PATH}/config.json" > /dev/null 2>&1 &
-        SB_PID=$!
-        sleep 2
-        if kill -0 $SB_PID 2>/dev/null; then
-            echo "[SB] PID: $SB_PID"
-        else
-            echo "[警告] SB 启动失败"
-        fi
-    fi
-    
-    # 启动 Argo 隧道
-    start_argo() {
-        local port=$1
-        local log="${FILE_PATH}/argo_${port}.log"
-        "$ARGO_FILE" tunnel --edge-ip-version auto --protocol http2 --no-autoupdate --url http://127.0.0.1:${port} > "$log" 2>&1 &
-        for i in {1..30}; do
-            sleep 1
-            local domain=$(grep -oE 'https://[a-zA-Z0-9-]+\.trycloudflare\.com' "$log" 2>/dev/null | head -1 | sed 's|https://||')
-            if [ -n "$domain" ]; then
-                echo "$domain"
-                return 0
-            fi
-        done
-        return 1
-    }
-    
-    if [ -x "$ARGO_FILE" ]; then
-        echo "[Argo] 启动隧道..."
-        VL_DOMAIN=$(start_argo $INTERNAL_VL_PORT)
-        VM_DOMAIN=$(start_argo $INTERNAL_VM_PORT)
-        TJ_DOMAIN=$(start_argo $INTERNAL_TJ_PORT)
-        
-        [ -n "$VL_DOMAIN" ] && echo "[Argo] VL: $VL_DOMAIN"
-        [ -n "$VM_DOMAIN" ] && echo "[Argo] VM: $VM_DOMAIN"
-        [ -n "$TJ_DOMAIN" ] && echo "[Argo] TJ: $TJ_DOMAIN"
-        
-        # 生成订阅
-        > "${FILE_PATH}/list.txt"
-        [ -n "$VL_DOMAIN" ] && echo "vless://${UUID}@${BEST_CF_DOMAIN}:443?encryption=none&security=tls&sni=${VL_DOMAIN}&type=ws&host=${VL_DOMAIN}&path=%2F${UUID}-vl#VL-${ISP}" >> "${FILE_PATH}/list.txt"
-        [ -n "$VM_DOMAIN" ] && echo "vmess://$(echo -n "{\"v\":\"2\",\"ps\":\"VM-${ISP}\",\"add\":\"${BEST_CF_DOMAIN}\",\"port\":\"443\",\"id\":\"${UUID}\",\"aid\":\"0\",\"net\":\"ws\",\"type\":\"none\",\"host\":\"${VM_DOMAIN}\",\"path\":\"/${UUID}-vm\",\"tls\":\"tls\",\"sni\":\"${VM_DOMAIN}\"}" | base64 -w 0)" >> "${FILE_PATH}/list.txt"
-        [ -n "$TJ_DOMAIN" ] && echo "trojan://${UUID}@${BEST_CF_DOMAIN}:443?security=tls&sni=${TJ_DOMAIN}&type=ws&host=${TJ_DOMAIN}&path=%2F${UUID}-tj#TJ-${ISP}" >> "${FILE_PATH}/list.txt"
-        cat "${FILE_PATH}/list.txt" > "${FILE_PATH}/sub.txt"
-        
-        echo "[完成] 订阅已生成"
-    fi
-    
-    echo "[初始化] 所有服务已启动"
-) &
 
-# 保持主进程运行
-echo "[主进程] 等待服务..."
-trap "kill $HTTP_PID 2>/dev/null; pkill -P $$; exit" SIGTERM SIGINT
+# 启动 Sing-box
+if [ -x "$SB_FILE" ]; then
+    "$SB_FILE" run -c "${FILE_PATH}/config.json" >/dev/null 2>&1 &
+    echo "[SB] Started"
+fi
 
-while true; do
-    sleep 30
-    if ! kill -0 $HTTP_PID 2>/dev/null; then
-        echo "[错误] HTTP 服务器已停止"
-        exit 1
-    fi
-done
+# 启动 Argo (后台)
+start_argo() {
+    local port=$1 log="${FILE_PATH}/argo_${port}.log"
+    "$ARGO_FILE" tunnel --edge-ip-version auto --protocol http2 --no-autoupdate --url http://127.0.0.1:${port} >"$log" 2>&1 &
+    for i in {1..25}; do
+        sleep 1
+        grep -oE 'https://[a-zA-Z0-9-]+\.trycloudflare\.com' "$log" 2>/dev/null | head -1 | sed 's|https://||' && return
+    done
+}
+
+if [ -x "$ARGO_FILE" ]; then
+    echo "[Argo] Starting tunnels..."
+    VL=$(start_argo 8081) && echo "[Argo] VL: $VL"
+    VM=$(start_argo 8082) && echo "[Argo] VM: $VM"
+    TJ=$(start_argo 8083) && echo "[Argo] TJ: $TJ"
+    
+    # 生成订阅
+    > "${FILE_PATH}/sub.txt"
+    [ -n "$VL" ] && echo "vless://${UUID}@${BEST_CF_DOMAIN}:443?encryption=none&security=tls&sni=${VL}&type=ws&host=${VL}&path=%2F${UUID}-vl#VL-${ISP}" >> "${FILE_PATH}/sub.txt"
+    [ -n "$VM" ] && echo "vmess://$(echo -n "{\"v\":\"2\",\"ps\":\"VM-${ISP}\",\"add\":\"${BEST_CF_DOMAIN}\",\"port\":\"443\",\"id\":\"${UUID}\",\"aid\":\"0\",\"net\":\"ws\",\"type\":\"none\",\"host\":\"${VM}\",\"path\":\"/${UUID}-vm\",\"tls\":\"tls\",\"sni\":\"${VM}\"}" | base64 -w 0)" >> "${FILE_PATH}/sub.txt"
+    [ -n "$TJ" ] && echo "trojan://${UUID}@${BEST_CF_DOMAIN}:443?security=tls&sni=${TJ}&type=ws&host=${TJ}&path=%2F${UUID}-tj#TJ-${ISP}" >> "${FILE_PATH}/sub.txt"
+    echo "[Done] Subscription ready"
+fi
+
+# 保持运行
+trap "kill $HTTP_PID 2>/dev/null; pkill -9 -f 'sing-box|cloudflared'; exit" SIGTERM SIGINT
+while kill -0 $HTTP_PID 2>/dev/null; do sleep 30; done
