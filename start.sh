@@ -43,8 +43,9 @@ L=(
 )
 
 # IP
-U1=$(E "aXB2NC5pcC5zYg==")
-U2=$(E "YXBpLmlwaWZ5Lm9yZw==")
+U1=$(E "aHR0cDovL2NoZWNraXAuYW1hem9uYXdzLmNvbQ==")
+U2=$(E "aHR0cHM6Ly9hcGkuaXBpZnkub3Jn")
+
 IP=$(GT "$U1")
 [ -z "$IP" ] && IP=$(GT "$U2")
 [ -z "$IP" ] && IP="${SERVER_IP:-127.0.0.1}"
